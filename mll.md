@@ -67,6 +67,809 @@ y = β₀ + β₁x₁ + β₂x₂ + ... + βₙxₙ
 ## Code
 
 ```python
+# ML Lab — P1 & P2: Uber Fare Prediction (Real Kaggle Dataset)
+
+## Dataset: uber.csv (Kaggle)
+
+**Columns in the real dataset:**
+```
+Unnamed: 0        → row index (drop)
+key               → timestamp string (drop)
+fare_amount       → TARGET variable (in USD)
+pickup_datetime   → datetime string → extract hour, day, month, year
+pickup_longitude  → pickup GPS longitude
+pickup_latitude   → pickup GPS latitude
+dropoff_longitude → dropoff GPS longitude
+dropoff_latitude  → dropoff GPS latitude
+passenger_count   → number of passengers (1–6)
+```
+
+**What we need to engineer:**
+- `distance_km` → calculated from coordinates using Haversine formula
+- `hour`, `day_of_week`, `month`, `year` → extracted from pickup_datetime
+- Drop GPS columns after computing distance
+
+---
+
+## Install Required Libraries
+
+```bash
+pip install pandas numpy matplotlib seaborn scikit-learn
+```
+
+---
+
+---
+
+# Practical 1 — Uber Fare Prediction using Linear Regression
+
+**Algorithm:** Linear Regression
+**Dataset:** uber.csv (Kaggle — 200,000 rows)
+
+---
+
+## Code
+
+```python
+# P1_linear_regression_uber.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+import warnings
+warnings.filterwarnings("ignore")
+
+# =============================================
+# STEP 1: LOAD DATASET
+# =============================================
+print("STEP 1: Loading Uber dataset...")
+df = pd.read_csv("uber.csv")
+
+print(f"Original shape: {df.shape}")
+print(f"\nColumns: {list(df.columns)}")
+print(f"\nFirst 5 rows:")
+print(df.head())
+print(f"\nData Types:")
+print(df.dtypes)
+print(f"\nMissing Values:")
+print(df.isnull().sum())
+
+# =============================================
+# STEP 2: PRE-PROCESSING
+# =============================================
+print("\nSTEP 2: Pre-processing...")
+
+# 2a. Drop useless columns
+df.drop(columns=["Unnamed: 0", "key"], inplace=True)
+
+# 2b. Drop rows with missing values
+df.dropna(inplace=True)
+print(f"Shape after dropping nulls: {df.shape}")
+
+# 2c. Parse pickup_datetime → extract features
+df["pickup_datetime"] = pd.to_datetime(df["pickup_datetime"], utc=True)
+df["hour"]        = df["pickup_datetime"].dt.hour
+df["day_of_week"] = df["pickup_datetime"].dt.dayofweek   # 0=Mon, 6=Sun
+df["month"]       = df["pickup_datetime"].dt.month
+df["year"]        = df["pickup_datetime"].dt.year
+df.drop(columns=["pickup_datetime"], inplace=True)
+
+# 2d. Filter valid fare amounts and passenger counts
+df = df[df["fare_amount"] > 0]
+df = df[df["fare_amount"] < 200]          # remove extreme fares
+df = df[df["passenger_count"] >= 1]
+df = df[df["passenger_count"] <= 6]
+print(f"Shape after basic filters: {df.shape}")
+
+# 2e. Filter valid GPS coordinates (New York City bounding box)
+df = df[
+    (df["pickup_longitude"]  >= -75) & (df["pickup_longitude"]  <= -72) &
+    (df["pickup_latitude"]   >= 40)  & (df["pickup_latitude"]   <= 42)  &
+    (df["dropoff_longitude"] >= -75) & (df["dropoff_longitude"] <= -72) &
+    (df["dropoff_latitude"]  >= 40)  & (df["dropoff_latitude"]  <= 42)
+]
+print(f"Shape after GPS filter: {df.shape}")
+
+# 2f. Calculate distance using Haversine Formula
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance in km between two GPS points"""
+    R = 6371  # Earth radius in km
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+df["distance_km"] = haversine_distance(
+    df["pickup_latitude"],  df["pickup_longitude"],
+    df["dropoff_latitude"], df["dropoff_longitude"]
+)
+
+# Remove zero-distance trips
+df = df[df["distance_km"] > 0.1]
+print(f"Shape after distance filter: {df.shape}")
+
+# Drop raw GPS columns (no longer needed)
+df.drop(columns=["pickup_longitude", "pickup_latitude",
+                  "dropoff_longitude", "dropoff_latitude"], inplace=True)
+
+print(f"\nFinal processed dataset:")
+print(df.head())
+print(f"\nShape: {df.shape}")
+print(f"\nFeatures: {list(df.columns)}")
+
+# =============================================
+# STEP 3: IDENTIFY OUTLIERS (IQR Method)
+# =============================================
+print("\nSTEP 3: Identifying Outliers...")
+
+# Visualize before removal
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+axes[0].boxplot(df["fare_amount"])
+axes[0].set_title("Fare Amount")
+axes[1].boxplot(df["distance_km"])
+axes[1].set_title("Distance (km)")
+axes[2].boxplot(df["passenger_count"])
+axes[2].set_title("Passenger Count")
+plt.suptitle("Boxplots — Before Outlier Removal")
+plt.tight_layout()
+plt.savefig("p1_boxplots_before.png", dpi=100)
+plt.show()
+
+# Remove outliers from fare_amount using IQR
+Q1 = df["fare_amount"].quantile(0.25)
+Q3 = df["fare_amount"].quantile(0.75)
+IQR = Q3 - Q1
+lower = Q1 - 1.5 * IQR
+upper = Q3 + 1.5 * IQR
+
+print(f"fare_amount: Q1={Q1:.2f}, Q3={Q3:.2f}, IQR={IQR:.2f}")
+print(f"Outlier bounds: [{lower:.2f}, {upper:.2f}]")
+
+outliers = df[(df["fare_amount"] < lower) | (df["fare_amount"] > upper)]
+print(f"Outliers found: {len(outliers)} rows ({len(outliers)/len(df)*100:.1f}%)")
+
+df_clean = df[(df["fare_amount"] >= lower) & (df["fare_amount"] <= upper)]
+print(f"Shape after outlier removal: {df_clean.shape}")
+
+# Also remove distance outliers
+Q1_d = df_clean["distance_km"].quantile(0.25)
+Q3_d = df_clean["distance_km"].quantile(0.75)
+IQR_d = Q3_d - Q1_d
+df_clean = df_clean[
+    (df_clean["distance_km"] >= Q1_d - 1.5*IQR_d) &
+    (df_clean["distance_km"] <= Q3_d + 1.5*IQR_d)
+]
+print(f"Final clean shape: {df_clean.shape}")
+
+# =============================================
+# STEP 4: CORRELATION ANALYSIS
+# =============================================
+print("\nSTEP 4: Correlation Analysis...")
+
+corr = df_clean.corr()
+print("\nCorrelation with fare_amount:")
+print(corr["fare_amount"].sort_values(ascending=False).round(4))
+
+plt.figure(figsize=(9, 7))
+sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm",
+            square=True, linewidths=0.5)
+plt.title("Feature Correlation Heatmap — Uber Dataset")
+plt.tight_layout()
+plt.savefig("p1_correlation_heatmap.png", dpi=100)
+plt.show()
+
+# Scatter plot: distance vs fare
+plt.figure(figsize=(6, 4))
+plt.scatter(df_clean["distance_km"], df_clean["fare_amount"],
+            alpha=0.1, s=5, color="steelblue")
+plt.xlabel("Distance (km)")
+plt.ylabel("Fare Amount (USD)")
+plt.title("Distance vs Fare Amount")
+plt.tight_layout()
+plt.savefig("p1_distance_vs_fare.png", dpi=100)
+plt.show()
+
+# =============================================
+# STEP 5: TRAIN LINEAR REGRESSION MODEL
+# =============================================
+print("\nSTEP 5: Training Linear Regression Model...")
+
+features = ["distance_km", "hour", "day_of_week",
+            "month", "year", "passenger_count"]
+X = df_clean[features]
+y = df_clean["fare_amount"]
+
+# Sample for faster training (use full for final submission)
+# df_sample = df_clean.sample(50000, random_state=42)
+# X = df_sample[features]; y = df_sample["fare_amount"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+print(f"Train size: {len(X_train):,} | Test size: {len(X_test):,}")
+
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+print("\nModel Coefficients:")
+for feat, coef in zip(features, model.coef_):
+    print(f"  {feat:<18}: {coef:>10.4f}")
+print(f"  {'Intercept':<18}: {model.intercept_:>10.4f}")
+
+# =============================================
+# STEP 6: EVALUATE MODEL
+# =============================================
+print("\nSTEP 6: Evaluating Model...")
+
+y_pred = model.predict(X_test)
+
+r2   = r2_score(y_test, y_pred)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+mse  = mean_squared_error(y_test, y_pred)
+mae  = np.mean(np.abs(y_test - y_pred))
+
+print(f"\n  R² Score : {r2:.4f}  (1.0 = perfect, higher is better)")
+print(f"  RMSE     : ${rmse:.4f}  (avg prediction error in USD)")
+print(f"  MSE      : {mse:.4f}")
+print(f"  MAE      : ${mae:.4f}")
+
+# Actual vs Predicted plot
+plt.figure(figsize=(7, 5))
+plt.scatter(y_test[:2000], y_pred[:2000],
+            alpha=0.3, s=10, color="steelblue")
+max_val = max(y_test.max(), y_pred.max())
+plt.plot([0, max_val], [0, max_val], "r--", lw=2, label="Perfect Prediction")
+plt.xlabel("Actual Fare (USD)")
+plt.ylabel("Predicted Fare (USD)")
+plt.title("Actual vs Predicted Fare — Linear Regression")
+plt.legend()
+plt.tight_layout()
+plt.savefig("p1_actual_vs_predicted.png", dpi=100)
+plt.show()
+
+# Residual plot
+residuals = y_test - y_pred
+plt.figure(figsize=(7, 4))
+plt.scatter(y_pred[:2000], residuals[:2000],
+            alpha=0.3, s=10, color="coral")
+plt.axhline(y=0, color="black", linestyle="--", lw=2)
+plt.xlabel("Predicted Fare (USD)")
+plt.ylabel("Residuals (Actual - Predicted)")
+plt.title("Residual Plot — Linear Regression")
+plt.tight_layout()
+plt.savefig("p1_residuals.png", dpi=100)
+plt.show()
+
+print("\nPractical 1 Complete!")
+print(f"Summary: R²={r2:.4f}, RMSE=${rmse:.4f}, MAE=${mae:.4f}")
+```
+
+---
+
+## Expected Output
+
+```
+Original shape: (200000, 9)
+Columns: ['Unnamed: 0', 'key', 'fare_amount', 'pickup_datetime',
+          'pickup_longitude', 'pickup_latitude', 'dropoff_longitude',
+          'dropoff_latitude', 'passenger_count']
+
+Shape after dropping nulls: (199999, 9)
+Shape after basic filters: (196xxx, 7)
+Shape after GPS filter: (189xxx, 7)
+Shape after distance filter: (188xxx, 4)
+Final clean shape: ~170,000 rows
+
+Correlation with fare_amount:
+fare_amount       1.0000
+distance_km       0.8xxx   ← strongest predictor
+year              0.1xxx
+hour              0.0xxx
+passenger_count   0.0xxx
+day_of_week       0.0xxx
+month            -0.0xxx
+
+Model Coefficients:
+  distance_km       :     2.1xxx   ← $2.1 per km
+  year              :     0.5xxx   ← fares rise each year
+  hour              :     0.0xxx
+  passenger_count   :     0.0xxx
+  Intercept         :  -xxx.xxxx
+
+R² Score : 0.7xxx
+RMSE     : $3.xxxx
+MSE      : xx.xxxx
+MAE      : $2.xxxx
+```
+
+---
+
+## Key Steps Explained (for viva)
+
+### Haversine Formula
+```
+Calculates straight-line distance between two GPS coordinates:
+
+d = 2R × arcsin(√(sin²(Δlat/2) + cos(lat1)×cos(lat2)×sin²(Δlon/2)))
+
+Where R = 6371 km (Earth's radius)
+New York trips: typically 1–20 km
+```
+
+### Feature Engineering from pickup_datetime
+```
+"2015-05-07 19:52:06 UTC"
+    → hour = 19          (evening rush hour → higher fare)
+    → day_of_week = 3    (Thursday)
+    → month = 5          (May)
+    → year = 2015
+```
+
+### Preprocessing Pipeline
+```
+1. Drop 'Unnamed: 0' and 'key' columns
+2. Parse pickup_datetime → extract hour, day, month, year
+3. Remove fare_amount ≤ 0 or ≥ 200 (invalid/extreme)
+4. Remove passenger_count < 1 or > 6
+5. Filter GPS to NYC bounding box (lat 40-42, lon -75 to -72)
+6. Compute distance_km using Haversine
+7. Remove trips with distance < 0.1 km (GPS noise)
+8. Remove fare outliers using IQR method
+```
+
+---
+
+## Viva Questions & Answers
+
+**Q1. What columns are in the Uber Kaggle dataset?**
+> `key` (timestamp ID), `fare_amount` (target in USD), `pickup_datetime` (trip start time), `pickup_longitude`, `pickup_latitude`, `dropoff_longitude`, `dropoff_latitude` (GPS coordinates), `passenger_count`. There is no direct distance column — it must be calculated.
+
+**Q2. How did you calculate distance from GPS coordinates?**
+> Used the Haversine formula which calculates the great-circle distance between two points on Earth's surface given their latitude and longitude. Formula accounts for Earth's curvature. Result in kilometers. This is the most important feature for fare prediction.
+
+**Q3. What is the Haversine formula?**
+> `d = 2R × arcsin(√(sin²(Δlat/2) + cos(lat₁)×cos(lat₂)×sin²(Δlon/2)))` where R = 6371 km. It gives the shortest distance over the Earth's surface between two GPS points. More accurate than Euclidean distance for geographic coordinates.
+
+**Q4. Why filter GPS coordinates to NYC bounding box?**
+> The raw dataset contains many invalid GPS entries — coordinates in the ocean, wrong hemisphere, or completely outside New York City (lat 40-42, lon -75 to -72). These are data entry errors or GPS malfunctions. Filtering to the NYC area removes bad data that would corrupt the model.
+
+**Q5. Why remove fare_amount ≤ 0?**
+> Negative fares are clearly data errors. Zero fares could be test trips or cancellations. The model should only learn from genuine paid rides.
+
+**Q6. Why extract hour, day_of_week, month from datetime?**
+> These capture temporal patterns in pricing: hour captures peak/off-peak demand (rush hours 7-9AM and 5-8PM are busier), day_of_week captures weekday vs weekend patterns, month captures seasonal variation, year captures fare inflation over time (2009-2015 in the dataset).
+
+**Q7. What did the correlation analysis show?**
+> `distance_km` has the strongest positive correlation with `fare_amount` (expected — longer trips cost more). `year` has a moderate positive correlation (fares increased over 2009-2015). `hour`, `passenger_count`, `day_of_week`, and `month` have weaker correlations.
+
+**Q8. What was the R² Score and what does it mean?**
+> Approximately 0.70-0.75 for Linear Regression. This means the model explains ~70-75% of the variance in fare amounts. The remaining 25-30% variance comes from factors not in the dataset: traffic, route taken, surge pricing, driver behavior, tolls.
+
+**Q9. What are the limitations of Linear Regression for this problem?**
+> Linear Regression assumes a linear relationship between features and fare. Real Uber pricing uses surge multipliers (non-linear). It can't capture interaction effects (e.g., far distance + peak hour = extra surge). Random Forest captures these non-linearities better.
+
+**Q10. What is MAE vs RMSE?**
+> MAE (Mean Absolute Error) = average absolute difference between predicted and actual fare. RMSE = square root of average squared differences. RMSE penalizes large errors more heavily (due to squaring). For fare prediction, RMSE of $3.50 means predictions are typically off by $3.50 per trip.
+
+**Q11. Why do you drop the 'key' and 'Unnamed: 0' columns?**
+> `Unnamed: 0` is just a row index with no predictive value. `key` is a timestamp string used as a unique identifier in the Kaggle dataset — it contains the same information as `pickup_datetime` but in a different format. Both add no information for the model.
+
+**Q12. What passenger_count values were invalid and why?**
+> The raw data has passenger_count = 0 (impossible for a ride), and passenger_count = 208 (clearly a data entry error — Uber cars carry maximum 6 passengers). We filter to keep only 1-6 passengers.
+
+**Q13. What is the residual plot and what did it show?**
+> Residual plot shows predicted fare vs (actual - predicted) for each test point. Ideally, residuals should be randomly scattered around 0 with no pattern. If residuals fan out (heteroscedasticity) or show a curve, the linear assumption may not hold perfectly for Uber data.
+
+**Q14. How large is the Uber dataset and how does that affect training?**
+> 200,000 rows (after filtering ~170,000 usable rows). Linear Regression is fast — trains in seconds even on 170K rows. For the demonstration, we can sample 50,000 rows. For better accuracy, use all available data.
+
+**Q15. What preprocessing step had the biggest impact on data quality?**
+> The GPS coordinate filtering (bounding box) removed the most problematic records — GPS coordinates with values like 872° latitude (physically impossible, max is 90°) or coordinates in the ocean. Without this step, the Haversine formula would compute meaningless distances.
+
+---
+
+---
+
+# Practical 2 — Uber Fare Prediction using Random Forest
+
+**Algorithm:** Random Forest Regression
+**Dataset:** uber.csv (Kaggle — same preprocessing as P1)
+
+---
+
+## Code
+
+```python
+# P2_random_forest_uber.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+import warnings
+warnings.filterwarnings("ignore")
+
+# =============================================
+# STEP 1-3: LOAD + PREPROCESS + CLEAN
+# (identical to P1 — paste same preprocessing here)
+# =============================================
+print("Loading and preprocessing Uber dataset...")
+
+df = pd.read_csv("uber.csv")
+df.drop(columns=["Unnamed: 0", "key"], inplace=True)
+df.dropna(inplace=True)
+
+# Parse datetime features
+df["pickup_datetime"] = pd.to_datetime(df["pickup_datetime"], utc=True)
+df["hour"]        = df["pickup_datetime"].dt.hour
+df["day_of_week"] = df["pickup_datetime"].dt.dayofweek
+df["month"]       = df["pickup_datetime"].dt.month
+df["year"]        = df["pickup_datetime"].dt.year
+df.drop(columns=["pickup_datetime"], inplace=True)
+
+# Filter valid records
+df = df[(df["fare_amount"] > 0) & (df["fare_amount"] < 200)]
+df = df[(df["passenger_count"] >= 1) & (df["passenger_count"] <= 6)]
+
+# NYC bounding box filter
+df = df[
+    (df["pickup_longitude"]  >= -75) & (df["pickup_longitude"]  <= -72) &
+    (df["pickup_latitude"]   >= 40)  & (df["pickup_latitude"]   <= 42)  &
+    (df["dropoff_longitude"] >= -75) & (df["dropoff_longitude"] <= -72) &
+    (df["dropoff_latitude"]  >= 40)  & (df["dropoff_latitude"]  <= 42)
+]
+
+# Haversine distance
+def haversine_distance(lat1, lon1, lat2, lon2):
+    R = 6371
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+df["distance_km"] = haversine_distance(
+    df["pickup_latitude"],  df["pickup_longitude"],
+    df["dropoff_latitude"], df["dropoff_longitude"]
+)
+df = df[df["distance_km"] > 0.1]
+
+# Drop GPS columns
+df.drop(columns=["pickup_longitude", "pickup_latitude",
+                  "dropoff_longitude", "dropoff_latitude"], inplace=True)
+
+# Remove fare and distance outliers using IQR
+for col in ["fare_amount", "distance_km"]:
+    Q1 = df[col].quantile(0.25)
+    Q3 = df[col].quantile(0.75)
+    IQR = Q3 - Q1
+    df = df[(df[col] >= Q1 - 1.5*IQR) & (df[col] <= Q3 + 1.5*IQR)]
+
+print(f"Final dataset shape: {df.shape}")
+print(f"fare_amount — mean: ${df['fare_amount'].mean():.2f}, "
+      f"std: ${df['fare_amount'].std():.2f}")
+print(f"distance_km — mean: {df['distance_km'].mean():.2f} km, "
+      f"max: {df['distance_km'].max():.2f} km")
+
+# =============================================
+# STEP 4: CORRELATION (same as P1)
+# =============================================
+print("\nCorrelation with fare_amount:")
+print(df.corr()["fare_amount"].sort_values(ascending=False).round(4))
+
+# =============================================
+# STEP 5: TRAIN/TEST SPLIT
+# =============================================
+features = ["distance_km", "hour", "day_of_week",
+            "month", "year", "passenger_count"]
+X = df[features]
+y = df["fare_amount"]
+
+# Use 50K sample for demonstration (use full for better accuracy)
+if len(df) > 50000:
+    idx = np.random.choice(len(df), 50000, replace=False)
+    X = X.iloc[idx]
+    y = y.iloc[idx]
+    print(f"\nUsing 50,000 sample for training speed")
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+print(f"Train: {len(X_train):,} | Test: {len(X_test):,}")
+
+# =============================================
+# STEP 6: TRAIN MODELS (RF + LR for comparison)
+# =============================================
+print("\nTraining models...")
+
+# Linear Regression (baseline)
+lr = LinearRegression()
+lr.fit(X_train, y_train)
+y_pred_lr = lr.predict(X_test)
+
+# Random Forest
+print("Training Random Forest (this may take 1-2 minutes)...")
+rf = RandomForestRegressor(
+    n_estimators=100,
+    max_depth=10,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    n_jobs=-1,        # use all CPU cores
+    random_state=42
+)
+rf.fit(X_train, y_train)
+y_pred_rf = rf.predict(X_test)
+
+# =============================================
+# STEP 7: EVALUATE — COMPARE BOTH MODELS
+# =============================================
+print("\n" + "=" * 55)
+print("MODEL COMPARISON")
+print("=" * 55)
+print(f"{'Model':<22} {'R² Score':>10} {'RMSE':>10} {'MAE':>10}")
+print("-" * 55)
+
+results = {}
+for name, y_pred in [("Linear Regression", y_pred_lr),
+                     ("Random Forest",     y_pred_rf)]:
+    r2   = r2_score(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    mae  = np.mean(np.abs(y_test - y_pred))
+    results[name] = {"R2": r2, "RMSE": rmse, "MAE": mae}
+    print(f"{name:<22} {r2:>10.4f} {rmse:>10.4f} {mae:>10.4f}")
+
+print("=" * 55)
+winner = max(results, key=lambda k: results[k]["R2"])
+print(f"Winner: {winner} (higher R², lower RMSE)")
+
+# =============================================
+# STEP 8: FEATURE IMPORTANCE (Random Forest)
+# =============================================
+print("\nFeature Importances — Random Forest:")
+importances = pd.Series(rf.feature_importances_, index=features)
+importances = importances.sort_values(ascending=False)
+for feat, imp in importances.items():
+    bar = "█" * int(imp * 60)
+    print(f"  {feat:<18}: {imp:.4f}  {bar}")
+
+plt.figure(figsize=(7, 4))
+importances.sort_values().plot(kind="barh", color="steelblue", edgecolor="white")
+plt.title("Random Forest — Feature Importances (Uber Dataset)")
+plt.xlabel("Importance Score")
+plt.tight_layout()
+plt.savefig("p2_feature_importance.png", dpi=100)
+plt.show()
+
+# =============================================
+# STEP 9: VISUALIZATIONS
+# =============================================
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+# Actual vs Predicted — Random Forest
+axes[0].scatter(y_test[:1500], y_pred_rf[:1500],
+                alpha=0.3, s=10, color="green", label="Random Forest")
+axes[0].scatter(y_test[:1500], y_pred_lr[:1500],
+                alpha=0.2, s=10, color="red", label="Linear Regression")
+max_val = y_test[:1500].max()
+axes[0].plot([0, max_val], [0, max_val], "k--", lw=2, label="Perfect")
+axes[0].set_xlabel("Actual Fare (USD)")
+axes[0].set_ylabel("Predicted Fare (USD)")
+axes[0].set_title("Actual vs Predicted — RF vs LR")
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# Prediction error distribution
+rf_errors = np.abs(y_test - y_pred_rf)
+lr_errors = np.abs(y_test - y_pred_lr)
+axes[1].hist(rf_errors, bins=50, alpha=0.6, color="green",
+             label=f"RF  (mean=${rf_errors.mean():.2f})")
+axes[1].hist(lr_errors, bins=50, alpha=0.6, color="red",
+             label=f"LR  (mean=${lr_errors.mean():.2f})")
+axes[1].set_xlabel("Absolute Error (USD)")
+axes[1].set_ylabel("Frequency")
+axes[1].set_title("Prediction Error Distribution")
+axes[1].legend()
+axes[1].set_xlim(0, 15)
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig("p2_comparison_plots.png", dpi=100)
+plt.show()
+
+# Fare by hour of day
+print("\nAverage fare by hour of day:")
+hourly = df.groupby("hour")["fare_amount"].mean()
+plt.figure(figsize=(9, 4))
+hourly.plot(kind="bar", color="steelblue", edgecolor="white")
+plt.xlabel("Hour of Day")
+plt.ylabel("Average Fare (USD)")
+plt.title("Average Uber Fare by Hour of Day")
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.savefig("p2_fare_by_hour.png", dpi=100)
+plt.show()
+
+# Year trend
+year_trend = df.groupby("year")["fare_amount"].mean()
+print("\nAverage fare by year:")
+print(year_trend.round(2))
+
+# =============================================
+# STEP 10: PREDICT ON A NEW SAMPLE TRIP
+# =============================================
+print("\n--- Predicting fare for a new trip ---")
+new_trip = pd.DataFrame({
+    "distance_km":    [5.2],   # 5.2 km ride
+    "hour":           [18],    # 6 PM (rush hour)
+    "day_of_week":    [4],     # Friday
+    "month":          [12],    # December
+    "year":           [2015],
+    "passenger_count":[2]
+})
+
+pred_lr = lr.predict(new_trip)[0]
+pred_rf = rf.predict(new_trip)[0]
+print(f"Trip: 5.2 km, Friday 6PM, Dec 2015, 2 passengers")
+print(f"  Linear Regression predicts: ${pred_lr:.2f}")
+print(f"  Random Forest predicts    : ${pred_rf:.2f}")
+
+print("\nPractical 2 Complete!")
+```
+
+---
+
+## Expected Output
+
+```
+Final dataset shape: (170,xxx, 8)
+fare_amount — mean: $11.xx, std: $6.xx
+distance_km — mean: 3.xx km, max: xx.xx km
+
+Correlation with fare_amount:
+fare_amount      1.0000
+distance_km      0.8xxx   ← by far the strongest
+year             0.1xxx
+hour             0.0xxx
+passenger_count  0.0xxx
+
+Using 50,000 sample for training speed
+Train: 40,000 | Test: 10,000
+
+=======================================================
+MODEL COMPARISON
+=======================================================
+Model                    R² Score       RMSE        MAE
+-------------------------------------------------------
+Linear Regression          0.7xxx     3.xxxx     2.xxxx
+Random Forest              0.8xxx     2.xxxx     1.xxxx    ← better
+=======================================================
+Winner: Random Forest
+
+Feature Importances — Random Forest:
+  distance_km       : 0.7xxx  ████████████████████████████████████████████
+  year              : 0.0xxx  ████
+  hour              : 0.0xxx  ███
+  passenger_count   : 0.0xxx  ██
+  month             : 0.0xxx  ██
+  day_of_week       : 0.0xxx  █
+
+Predicting fare for a new trip:
+  Linear Regression predicts: $13.xx
+  Random Forest predicts    : $12.xx
+```
+
+---
+
+## Key Observations from Real Dataset
+
+### Why Random Forest beats Linear Regression
+```
+Uber pricing is non-linear:
+- Surge pricing multiplier (1.5x, 2x) at peak hours
+- Base fare + per-km rate + per-minute rate (non-linear)
+- Airport flat rates (outlier trips)
+Random Forest captures these patterns via decision tree splits.
+Linear Regression assumes a straight line — misses the curves.
+```
+
+### Feature Importance Insight
+```
+distance_km = ~70% importance → distance is the dominant predictor
+year        = ~10% importance → fare inflation 2009→2015
+hour        = ~7%  importance → some peak hour effect
+passenger   = ~5%  importance → minimal direct effect on Uber fares
+```
+
+---
+
+## Viva Questions & Answers (P2 Specific)
+
+**Q1. Why is Random Forest better than Linear Regression for Uber fare prediction?**
+> Uber uses non-linear pricing: surge multipliers, base fare components, per-minute rates. Linear Regression assumes a straight-line relationship (fare = a×distance + b×hour + ...). Random Forest uses decision tree splits to model complex non-linear patterns and feature interactions — capturing surge pricing at peak hours combined with long distances.
+
+**Q2. What does the feature importance tell us about Uber pricing?**
+> `distance_km` has ~70% importance — confirming distance is the primary driver of fare. `year` has ~10% — fares increased from 2009-2015 (inflation + Uber's pricing adjustments). `hour` has ~7% — some peak hour premium. `passenger_count` has minimal importance — Uber fares are not per-person unlike traditional taxis.
+
+**Q3. Why did you use `n_jobs=-1` in RandomForestRegressor?**
+> `n_jobs=-1` tells scikit-learn to use all available CPU cores in parallel. Training 100 decision trees is embarrassingly parallelizable — each tree is independent. On a 4-core machine, training takes ~25% of the time compared to `n_jobs=1`.
+
+**Q4. How does the Haversine distance compare to actual road distance?**
+> Haversine calculates the straight-line distance (as the crow flies) between two GPS points. Actual road distance (Manhattan distance or GPS routing) would be longer. In NYC with a grid layout, actual distance ≈ Haversine × 1.3-1.5. This is why the model might slightly underpredict fares for circuitous routes.
+
+**Q5. What insights does fare by hour of day reveal?**
+> Late night/early morning (12AM-5AM): lowest fares (less demand, no surge). Morning rush (7-9AM) and evening rush (5-8PM): higher average fares due to surge pricing and more traffic adding to per-minute charges. Midnight surge on weekends (bar closings) also appears.
+
+**Q6. What is the effect of year on Uber fares?**
+> Uber launched in 2010. Fares gradually increased from 2009-2015 due to: general inflation, Uber adjusting pricing in different cities, new features (UberXL, UberBLACK with higher base fares), and market maturity. `year` has a consistent positive correlation with fare_amount.
+
+**Q7. What are the differences in preprocessing between P1 and P2?**
+> Preprocessing is identical — P2 uses the same cleaned dataset. The only difference is the model: P1 trains LinearRegression, P2 trains RandomForestRegressor. This ensures a fair comparison — same train/test split, same features, same data quality.
+
+**Q8. Why use a sample of 50,000 rows for training?**
+> Random Forest with 100 trees on 170K rows can take 10-15 minutes. For a practical demonstration, 50K rows gives nearly the same accuracy (diminishing returns beyond 50K for this dataset) in 1-2 minutes. For a production model, use all available data.
+
+**Q9. How would you further improve the model?**
+> Add more features: airport flag (JFK/LaGuardia — flat rate trips), rush hour flag (boolean), day-of-week category. Use cross-validation instead of single split. Tune hyperparameters (max_depth, n_estimators) via GridSearchCV. Try XGBoost or LightGBM (typically outperform Random Forest). Add weather data as an additional feature.
+
+**Q10. What is the `min_samples_leaf` parameter and why was it set to 2?**
+> `min_samples_leaf=2` means each leaf node must contain at least 2 training samples. This prevents the tree from creating leaves with only 1 sample (memorizing noise). It's a form of regularization — reduces overfitting and improves generalization on the test set.
+
+---
+
+## Quick Preprocessing Reference (for exam)
+
+```python
+# The 8 essential preprocessing steps for uber.csv:
+
+# 1. Drop useless columns
+df.drop(columns=["Unnamed: 0", "key"], inplace=True)
+
+# 2. Handle missing values
+df.dropna(inplace=True)
+
+# 3. Parse datetime
+df["pickup_datetime"] = pd.to_datetime(df["pickup_datetime"], utc=True)
+df["hour"] = df["pickup_datetime"].dt.hour
+df["day_of_week"] = df["pickup_datetime"].dt.dayofweek
+df["month"] = df["pickup_datetime"].dt.month
+df["year"] = df["pickup_datetime"].dt.year
+
+# 4. Filter valid fares
+df = df[(df["fare_amount"] > 0) & (df["fare_amount"] < 200)]
+
+# 5. Filter valid passenger count
+df = df[(df["passenger_count"] >= 1) & (df["passenger_count"] <= 6)]
+
+# 6. Filter valid NYC GPS coordinates
+df = df[(df["pickup_longitude"] >= -75) & (df["pickup_longitude"] <= -72) &
+        (df["pickup_latitude"] >= 40) & (df["pickup_latitude"] <= 42) &
+        (df["dropoff_longitude"] >= -75) & (df["dropoff_longitude"] <= -72) &
+        (df["dropoff_latitude"] >= 40) & (df["dropoff_latitude"] <= 42)]
+
+# 7. Calculate distance using Haversine formula
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1; dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+df["distance_km"] = haversine(df["pickup_latitude"], df["pickup_longitude"],
+                               df["dropoff_latitude"], df["dropoff_longitude"])
+df = df[df["distance_km"] > 0.1]
+
+# 8. Remove outliers using IQR
+Q1, Q3 = df["fare_amount"].quantile([0.25, 0.75])
+IQR = Q3 - Q1
+df = df[(df["fare_amount"] >= Q1 - 1.5*IQR) & (df["fare_amount"] <= Q3 + 1.5*IQR)]
+```
 # P1_linear_regression_uber.py
 import pandas as pd
 import numpy as np
